@@ -199,28 +199,62 @@ fn generate_battery_icon(percentage: Option<u8>) -> Icon {
 }
 
 /// Scans all device interfaces matching the mouse to find the correct feature report channel
+
 fn poll_mouse_battery(api: &HidApi) -> BatteryStatus {
-    let devices = match api.device_list().find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID) {
-        Some(_) => api.device_list().filter(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID),
-        None => return BatteryStatus::Disconnected,
-    };
+    const USAGE_PAGE: u16 = 0xFF02;
+    const USAGE: u16 = 0x0002;
 
-    for info in devices {
-        if let Ok(device) = info.open_device(api) {
-            let mut buf = vec![0u8; REPORT_SIZE];
-            buf[0] = REPORT_ID;
+    const QUERY_PREFIX: [u8; 8] =
+        [0x09, 0x0C, 0x09, 0x01, 0x01, 0x00, 0x01, 0x00];
 
-            if device.get_feature_report(&mut buf).is_ok() {
-                let battery_level = buf[8];
-                if battery_level <= 100 {
-                    return BatteryStatus::Connected(battery_level);
+    // Look specifically for the HID collection used by the working Python script.
+    let paths: Vec<_> = api
+        .device_list()
+        .filter(|d| {
+            d.vendor_id() == VENDOR_ID
+                && d.product_id() == PRODUCT_ID
+                && d.usage_page() == USAGE_PAGE
+                && d.usage() == USAGE
+        })
+        .map(|d| d.path().to_owned())
+        .collect();
+
+    for path in paths {
+        // Retry briefly in case the mouse has just woken up.
+        for attempt in 0..3 {
+            if let Ok(device) = api.open_path(&path) {
+                let mut query = vec![0u8; REPORT_SIZE];
+                query[..QUERY_PREFIX.len()].copy_from_slice(&QUERY_PREFIX);
+
+                // Match the Python script: send the query before reading.
+                if device.send_feature_report(&query).is_ok() {
+                    thread::sleep(Duration::from_millis(50));
+
+                    let mut response = vec![0u8; REPORT_SIZE];
+                    response[0] = REPORT_ID;
+
+                    if let Ok(length) =
+                        device.get_feature_report(&mut response)
+                    {
+                        if length >= 9
+                            && response[..8] == QUERY_PREFIX
+                            && response[8] <= 100
+                        {
+                            return BatteryStatus::Connected(response[8]);
+                        }
+                    }
                 }
+            }
+
+            if attempt < 2 {
+                thread::sleep(Duration::from_millis(250));
             }
         }
     }
 
     BatteryStatus::Disconnected
 }
+
 
 /// Updates tray tooltip, menu text, and dynamic battery icon
 fn update_tray_ui(
