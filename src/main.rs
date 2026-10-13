@@ -153,40 +153,88 @@ fn main() {
 }
 
 /// Dynamically generates a clean 32x32 battery icon with fill percentage
+
 fn generate_battery_icon(percentage: Option<u8>) -> Icon {
-    let width = 32;
-    let height = 32;
+    let width = 32usize;
+    let height = 32usize;
     let mut rgba = vec![0u8; width * height * 4];
 
+    // Draw a warning icon when battery data is unavailable.
+    if percentage.is_none() {
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) * 4;
+
+                // Upward-pointing warning triangle.
+                let dx = (x as i32 - 16).abs();
+                let half_width = (y as i32 - 5) * 12 / 22;
+                let in_triangle =
+                    (5..=27).contains(&y) && dx <= half_width;
+
+                // Black exclamation mark.
+                let exclamation_stem =
+                    (x == 15 || x == 16) && (11..=19).contains(&y);
+                let exclamation_dot =
+                    (x == 15 || x == 16) && (22..=23).contains(&y);
+
+                if in_triangle {
+                    rgba[idx] = 255;
+                    rgba[idx + 1] = 190;
+                    rgba[idx + 2] = 35;
+                    rgba[idx + 3] = 255;
+                }
+
+                if exclamation_stem || exclamation_dot {
+                    rgba[idx] = 25;
+                    rgba[idx + 1] = 25;
+                    rgba[idx + 2] = 25;
+                    rgba[idx + 3] = 255;
+                }
+            }
+        }
+
+        return Icon::from_rgba(rgba, width as u32, height as u32).unwrap();
+    }
+
+    // Normal battery icon.
     let pct = percentage.unwrap_or(0);
 
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) * 4;
-            
-            let is_border = (x == 4 || x == 25) && (y >= 8 && y <= 24)
-                || (y == 8 || y == 24) && (x >= 4 && x <= 25);
-            
-            let is_terminal = (x == 26 || x == 27) && (y >= 14 && y <= 18);
 
-            let inner_width = 18;
-            let fill_width = ((inner_width as f32) * (pct as f32 / 100.0)) as usize;
-            let is_fill = percentage.is_some() 
-                && (x >= 6 && x < 6 + fill_width) 
-                && (y >= 10 && y <= 22);
+            let is_border =
+                ((x == 4 || x == 25) && (8..=24).contains(&y))
+                || ((y == 8 || y == 24) && (4..=25).contains(&x));
+
+            let is_terminal =
+                (x == 26 || x == 27) && (14..=18).contains(&y);
+
+            let fill_width = 18 * pct as usize / 100;
+
+            let is_fill =
+                x >= 6
+                && x < 6 + fill_width
+                && (10..=22).contains(&y);
 
             if is_border || is_terminal {
-                rgba[idx] = 220;     // R
-                rgba[idx + 1] = 220; // G
-                rgba[idx + 2] = 220; // B
-                rgba[idx + 3] = 255; // A
+                rgba[idx] = 220;
+                rgba[idx + 1] = 220;
+                rgba[idx + 2] = 220;
+                rgba[idx + 3] = 255;
             } else if is_fill {
                 if pct < 20 {
-                    rgba[idx] = 230; rgba[idx + 1] = 50; rgba[idx + 2] = 50;
+                    rgba[idx] = 230;
+                    rgba[idx + 1] = 50;
+                    rgba[idx + 2] = 50;
                 } else if pct < 50 {
-                    rgba[idx] = 240; rgba[idx + 1] = 200; rgba[idx + 2] = 50;
+                    rgba[idx] = 240;
+                    rgba[idx + 1] = 200;
+                    rgba[idx + 2] = 50;
                 } else {
-                    rgba[idx] = 50; rgba[idx + 1] = 205; rgba[idx + 2] = 50;
+                    rgba[idx] = 50;
+                    rgba[idx + 1] = 205;
+                    rgba[idx + 2] = 50;
                 }
                 rgba[idx + 3] = 255;
             } else {
@@ -198,8 +246,9 @@ fn generate_battery_icon(percentage: Option<u8>) -> Icon {
     Icon::from_rgba(rgba, width as u32, height as u32).unwrap()
 }
 
-/// Scans all device interfaces matching the mouse to find the correct feature report channel
 
+
+//fetch battery data
 fn poll_mouse_battery(api: &HidApi) -> BatteryStatus {
     const USAGE_PAGE: u16 = 0xFF02;
     const USAGE: u16 = 0x0002;
@@ -266,6 +315,7 @@ fn update_tray_ui(
         BatteryStatus::Connected(pct) => {
             let _ = tray.set_tooltip(Some(format!("MCHOSE G3: {}%", pct)));
             let _ = tray.set_icon(Some(generate_battery_icon(Some(*pct))));
+            //let _ = tray.set_icon(Some(generate_battery_icon(Some(10))));
             status_item.set_text(format!("Status: Connected ({}%)", pct));
         }
         BatteryStatus::Disconnected => {
