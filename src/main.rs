@@ -2,6 +2,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use auto_launch::AutoLaunch;
+use std::process::Command;
 use hidapi::HidApi;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -38,7 +39,10 @@ fn main() {
 
     // 2. Check startup status at launch; if not enabled, ask user with a Yes/No dialog
     let mut is_autostart_active = auto_launcher.is_enabled().unwrap_or(false);
-    if !is_autostart_active {
+    let silent_restart = std::env::args()
+        .any(|arg| arg == "--silent-restart");
+
+    if !is_autostart_active && !silent_restart {
         let user_choice = rfd::MessageDialog::new()
             .set_title(APP_NAME)
             .set_description("Would you like MCHOSE G3 Battery Monitor to launch automatically when your computer starts up?")
@@ -128,12 +132,18 @@ fn main() {
             if event.id == quit_id {
                 elwt.exit();
             } else if event.id == refresh_id {
-                if let Ok(hid_api) = HidApi::new() {
-                    let battery = poll_mouse_battery(&hid_api);
-                    let mut status = current_status.lock().unwrap();
-                    *status = battery.clone();
+                if let Ok(exe_path) = std::env::current_exe() {
+                    let restarted = Command::new(exe_path)
+                        .arg("--silent-restart")
+                        .spawn()
+                        .is_ok();
+
+                    if restarted {
+                        elwt.exit();
+                    }
                 }
-            } else if event.id == autostart_id {
+            }
+            else if event.id == autostart_id {
                 let is_checked = autostart_menu_item.is_checked();
                 if is_checked {
                     let _ = auto_launcher.enable();
