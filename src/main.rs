@@ -153,13 +153,12 @@ fn main() {
 }
 
 /// Dynamically generates a clean 32x32 battery icon with fill percentage
-
 fn generate_battery_icon(percentage: Option<u8>) -> Icon {
     let width = 32usize;
     let height = 32usize;
     let mut rgba = vec![0u8; width * height * 4];
 
-    // Draw a warning icon when battery data is unavailable.
+    // Warning icon when battery data is unavailable.
     if percentage.is_none() {
         for y in 0..height {
             for x in 0..width {
@@ -196,48 +195,68 @@ fn generate_battery_icon(percentage: Option<u8>) -> Icon {
         return Icon::from_rgba(rgba, width as u32, height as u32).unwrap();
     }
 
-    // Normal battery icon.
+    // Normal horizontal battery icon.
     let pct = percentage.unwrap_or(0);
 
+    // Outline color: red below 20%, gray otherwise.
+    let (outline_r, outline_g, outline_b) = if pct < 20 {
+        (230, 50, 50)
+    } else {
+        (220, 220, 220)
+    };
+
+    // Two-pixel-thick battery body outline.
+    // Body spans x=4..25 and y=8..24.
+    // Interior fill is inset to x=6..23 and y=10..22.
+    // Terminal is on the right.
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) * 4;
 
             let is_border =
-                ((x == 4 || x == 25) && (8..=24).contains(&y))
-                || ((y == 8 || y == 24) && (4..=25).contains(&x));
+                // Left and right sides, 2 pixels thick.
+                ((4..=5).contains(&x) && (8..=24).contains(&y))
+                || ((24..=25).contains(&x) && (8..=24).contains(&y))
+                // Top and bottom, 2 pixels thick.
+                || ((8..=9).contains(&y) && (6..=23).contains(&x))
+                || ((23..=24).contains(&y) && (6..=23).contains(&x));
 
             let is_terminal =
-                (x == 26 || x == 27) && (14..=18).contains(&y);
+                (26..=27).contains(&x) && (14..=18).contains(&y);
 
+            // Fill grows from left to right inside the outline.
             let fill_width = 18 * pct as usize / 100;
-
             let is_fill =
                 x >= 6
                 && x < 6 + fill_width
                 && (10..=22).contains(&y);
 
             if is_border || is_terminal {
-                rgba[idx] = 220;
-                rgba[idx + 1] = 220;
-                rgba[idx + 2] = 220;
+                rgba[idx] = outline_r;
+                rgba[idx + 1] = outline_g;
+                rgba[idx + 2] = outline_b;
                 rgba[idx + 3] = 255;
             } else if is_fill {
                 if pct < 20 {
+                    // Red: very low.
                     rgba[idx] = 230;
                     rgba[idx + 1] = 50;
                     rgba[idx + 2] = 50;
                 } else if pct < 50 {
+                    // Yellow: low.
                     rgba[idx] = 240;
                     rgba[idx + 1] = 200;
                     rgba[idx + 2] = 50;
                 } else {
+                    // Green: medium to high.
                     rgba[idx] = 50;
                     rgba[idx + 1] = 205;
                     rgba[idx + 2] = 50;
                 }
+
                 rgba[idx + 3] = 255;
             } else {
+                // Transparent background.
                 rgba[idx + 3] = 0;
             }
         }
@@ -245,6 +264,7 @@ fn generate_battery_icon(percentage: Option<u8>) -> Icon {
 
     Icon::from_rgba(rgba, width as u32, height as u32).unwrap()
 }
+
 
 
 
@@ -315,7 +335,7 @@ fn update_tray_ui(
         BatteryStatus::Connected(pct) => {
             let _ = tray.set_tooltip(Some(format!("MCHOSE G3: {}%", pct)));
             let _ = tray.set_icon(Some(generate_battery_icon(Some(*pct))));
-            //let _ = tray.set_icon(Some(generate_battery_icon(Some(10))));
+            //let _ = tray.set_icon(Some(generate_battery_icon(Some(5)))); //Look testing
             status_item.set_text(format!("Status: Connected ({}%)", pct));
         }
         BatteryStatus::Disconnected => {
