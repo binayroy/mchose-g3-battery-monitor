@@ -4,10 +4,18 @@
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 compile_error!("This app supports Windows and Linux only.");
 
+#[path = "Autostart.rs"]
 mod autostart;
+
 mod debuglog;
+
+#[path = "Icon.rs"]
 mod icon;
+
+#[path = "Monitor.rs"]
 mod monitor;
+
+#[path = "State.rs"]
 mod state;
 
 use std::sync::Arc;
