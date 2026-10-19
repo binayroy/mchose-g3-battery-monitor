@@ -1,357 +1,290 @@
-// Hides the console terminal window when launching on Windows
+// Hides the console window when launching on Windows
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use auto_launch::AutoLaunch;
-use std::process::Command;
-use hidapi::HidApi;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    Icon, TrayIconBuilder,
-};
-use winit::event_loop::{ControlFlow, EventLoop};
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+compile_error!("This app supports Windows and Linux only.");
 
-// MCHOSE G3 USB HID Identifiers
-const VENDOR_ID: u16 = 0x258A;
-const PRODUCT_ID: u16 = 0x0138;
-const REPORT_ID: u8 = 0x09;
-const REPORT_SIZE: usize = 520;
+mod autostart;
+mod debuglog;
+mod icon;
+mod monitor;
+mod state;
+
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+use tray_icon::{
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    TrayIcon, TrayIconBuilder,
+};
+
+use icon::generate_battery_icon;
+use state::{LinkStatus, Shared, Snapshot};
 
 const APP_NAME: &str = "MCHOSE G3 Battery Monitor";
-const APP_VERSION: &str = "v0.9.1";
+const APP_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
-#[derive(Clone, Debug)]
-enum BatteryStatus {
-    Connected(u8),
-    Disconnected,
+// ======================================================================
+// Text helpers (wording taken from the Python app)
+// ======================================================================
+
+fn status_text(s: &Snapshot) -> String {
+    match s.status {
+        LinkStatus::Connected => match s.percentage {
+            Some(p) => format!("Connected - Battery: {p}%"),
+            None => "Connected - Battery unknown".to_string(),
+        },
+        LinkStatus::Disconnected => "Mouse: Disconnected / Sleeping".to_string(),
+        LinkStatus::Checking => "Checking Live Battery".to_string(),
+        LinkStatus::Error => "Monitor error".to_string(),
+        LinkStatus::Starting => "Starting...".to_string(),
+    }
+}
+
+fn receiver_text(s: &Snapshot) -> &'static str {
+    if s.receiver {
+        "Receiver: Connected"
+    } else {
+        "Receiver: Disconnected"
+    }
+}
+
+fn tooltip_text(s: &Snapshot) -> String {
+    match (s.status, s.percentage) {
+        (LinkStatus::Connected | LinkStatus::Checking, Some(p)) => format!("MCHOSE G3: {p}%"),
+        (LinkStatus::Error, _) => "MCHOSE G3: Monitor error".to_string(),
+        (LinkStatus::Starting, _) => "MCHOSE G3: Starting".to_string(),
+        (_, Some(p)) => format!("MCHOSE G3: Disconnected / Sleeping - last battery {p}%"),
+        (_, None) => "MCHOSE G3: Disconnected / Sleeping".to_string(),
+    }
+}
+
+// ======================================================================
+// Startup prompt (asked once, then remembered)
+// ======================================================================
+
+/// Returns whether autostart is active after the (possible) prompt.
+fn startup_prompt() -> bool {
+    autostart::sync_path();
+    let mut active = autostart::is_enabled();
+
+    if !autostart::prompt_shown() {
+        if !active {
+            let choice = rfd::MessageDialog::new()
+                .set_title(APP_NAME)
+                .set_description(
+                    "Would you like MCHOSE G3 Battery Monitor to launch automatically \
+                     when you sign in?\nYou can change this later from menu",
+                )
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+
+            if choice == rfd::MessageDialogResult::Yes && autostart::set_enabled(true).is_ok() {
+                active = true;
+            }
+        }
+        // Remember that we asked, whatever the answer was.
+        autostart::mark_prompt_shown();
+    }
+
+    active
+}
+
+// ======================================================================
+// Tray application
+// ======================================================================
+
+struct App {
+    tray: TrayIcon,
+    status_item: MenuItem,
+    receiver_item: MenuItem,
+    autostart_item: CheckMenuItem,
+    quit_id: MenuId,
+    refresh_id: MenuId,
+    autostart_id: MenuId,
+    shared: Arc<Shared>,
+    last_snapshot: Option<Snapshot>,
+    last_icon: Option<Option<u8>>,
+    last_beat: StdInstant,
+}
+
+impl App {
+    /// Must be called after the platform UI loop is initialised
+    /// (Win32 message loop on Windows, gtk::init on Linux).
+    fn new(shared: Arc<Shared>) -> Self {
+        let autostart_active = startup_prompt();
+
+        let menu = Menu::new();
+        let name_item = MenuItem::new(APP_NAME, false, None);
+        let version_item = MenuItem::new(format!("Version: {APP_VERSION}"), false, None);
+        let status_item = MenuItem::new("Status: Starting...", false, None);
+        let receiver_item = MenuItem::new("Receiver: Connected", false, None);
+        let refresh_item = MenuItem::new("Refresh Now", true, None);
+        let autostart_item = CheckMenuItem::new("Launch at Startup", true, autostart_active, None);
+        let quit_item = MenuItem::new("Quit", true, None);
+
+        menu.append(&name_item).unwrap();
+        menu.append(&version_item).unwrap();
+        menu.append(&PredefinedMenuItem::separator()).unwrap();
+        menu.append(&status_item).unwrap();
+        menu.append(&receiver_item).unwrap();
+        menu.append(&refresh_item).unwrap();
+        menu.append(&autostart_item).unwrap();
+        menu.append(&PredefinedMenuItem::separator()).unwrap();
+        menu.append(&quit_item).unwrap();
+
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("MCHOSE G3: Starting")
+            .with_icon(generate_battery_icon(None))
+            .build()
+            .expect("Failed to initialize system tray icon");
+
+        App {
+            tray,
+            quit_id: quit_item.id().clone(),
+            refresh_id: refresh_item.id().clone(),
+            autostart_id: autostart_item.id().clone(),
+            status_item,
+            receiver_item,
+            autostart_item,
+            shared,
+            last_snapshot: None,
+            last_icon: Some(None),
+            last_beat: StdInstant::now(),
+        }
+    }
+
+    /// Called periodically by the platform loop. Returns true when the app should quit.
+    fn tick(&mut self) -> bool {
+        // Heartbeat: shows in the debug log whether the UI thread is alive.
+        if self.last_beat.elapsed() >= StdDuration::from_secs(1) {
+            self.last_beat = StdInstant::now();
+            //crate::dlog!("[UI] tick alive");
+        }
+
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            if event.id == self.quit_id {
+                self.shared.request_stop();
+                return true;
+            } else if event.id == self.refresh_id {
+                self.shared.request_refresh();
+            } else if event.id == self.autostart_id {
+                self.toggle_autostart();
+            }
+        }
+
+        self.render();
+        false
+    }
+
+    fn toggle_autostart(&self) {
+        // The check item flips itself on click; apply the new state.
+        let wanted = self.autostart_item.is_checked();
+        if let Err(e) = autostart::set_enabled(wanted) {
+            crate::dlog!("[WARN] Could not change autostart: {e}");
+        }
+        // Show what actually happened.
+        self.autostart_item.set_checked(autostart::is_enabled());
+    }
+
+    /// Only touches the tray when something actually changed.
+    fn render(&mut self) {
+        let snap = self.shared.snapshot();
+        if self.last_snapshot == Some(snap) {
+            return;
+        }
+        self.last_snapshot = Some(snap);
+
+        // Battery graphic only while the mouse is believed to be reachable;
+        // otherwise show the warning icon (same as the Python app).
+        let icon_pct = match snap.status {
+            LinkStatus::Connected | LinkStatus::Checking => snap.percentage,
+            _ => None,
+        };
+        if self.last_icon != Some(icon_pct) {
+            let _ = self.tray.set_icon(Some(generate_battery_icon(icon_pct)));
+            self.last_icon = Some(icon_pct);
+        }
+
+        let _ = self.tray.set_tooltip(Some(tooltip_text(&snap)));
+        self.status_item.set_text(status_text(&snap));
+        self.receiver_item.set_text(receiver_text(&snap));
+    }
+}
+
+// ======================================================================
+// Platform event loops
+// ======================================================================
+
+#[cfg(target_os = "windows")]
+fn run(shared: Arc<Shared>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG,
+        PM_REMOVE, QS_ALLINPUT, WM_QUIT,
+    };
+
+    // Plain Win32 message loop (what tray-icon expects on Windows).
+    // The tray icon and its menu create their own hidden window on this
+    // thread, so the thread only has to keep pumping messages.
+    let mut app = App::new(shared);
+
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        'main: loop {
+            // Handle every pending message first.
+            while PeekMessageW(&mut msg, std::mem::zeroed(), 0, 0, PM_REMOVE) != 0 {
+                if msg.message == WM_QUIT {
+                    break 'main;
+                }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            if app.tick() {
+                break;
+            }
+
+            // Sleep until a message arrives or 250 ms pass.
+            MsgWaitForMultipleObjects(0, std::ptr::null(), 0, 250, QS_ALLINPUT);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run(shared: Arc<Shared>) {
+    use gtk::glib::ControlFlow;
+    use std::time::Duration;
+
+    // The tray (libappindicator) and menus need a running GTK main loop.
+    gtk::init().expect("Failed to initialise GTK (is a display available?)");
+    let mut app = App::new(shared);
+
+    gtk::glib::timeout_add_local(Duration::from_millis(250), move || {
+        if app.tick() {
+            gtk::main_quit();
+            ControlFlow::Break
+        } else {
+            ControlFlow::Continue
+        }
+    });
+
+    gtk::main();
 }
 
 fn main() {
-    // 1. Configure Auto-Launch / Startup settings
-    let exe_path = std::env::current_exe().unwrap_or_default();
-    let auto_launcher = AutoLaunch::new(
-        "MCHOSE_G3_Battery_Monitor",
-        exe_path.to_str().unwrap_or(""),
-        &["--minimized"],
-    );
+    debuglog::init();
+    crate::dlog!("[MAIN] started");
 
-    // 2. Check startup status at launch; if not enabled, ask user with a Yes/No dialog
-    let mut is_autostart_active = auto_launcher.is_enabled().unwrap_or(false);
-    let silent_restart = std::env::args()
-        .any(|arg| arg == "--silent-restart");
+    // Linux: make sure the app has a launcher entry (with icon) in the app menu.
+    autostart::install_launcher();
 
-    if !is_autostart_active && !silent_restart {
-        let user_choice = rfd::MessageDialog::new()
-            .set_title(APP_NAME)
-            .set_description("Would you like MCHOSE G3 Battery Monitor to launch automatically when your computer starts up?")
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show();
+    let shared = Arc::new(Shared::new());
 
-        if user_choice == rfd::MessageDialogResult::Yes {
-            if auto_launcher.enable().is_ok() {
-                is_autostart_active = true;
-            }
-        }
-    }
+    // Background HID worker (cached query, then live reports).
+    let worker_state = Arc::clone(&shared);
+    thread::spawn(move || monitor::run(worker_state));
 
-    // 3. Initialize Event Loop (Required for Windows tray events & right-click menus)
-    let event_loop = EventLoop::new().unwrap();
-
-    // 4. Build System Tray Right-Click Menu
-    let tray_menu = Menu::new();
-    
-    let name_item = MenuItem::new(APP_NAME, false, None);
-    let version_item = MenuItem::new(format!("Version: {}", APP_VERSION), false, None);
-    let status_menu_item = MenuItem::new("Status: Connecting...", false, None);
-    let refresh_menu_item = MenuItem::new("Refresh Now", true, None);
-
-    let autostart_menu_item = CheckMenuItem::new(
-        "Launch at Startup",
-        true,
-        is_autostart_active,
-        None,
-    );
-
-    let quit_menu_item = MenuItem::new("Quit", true, None);
-
-    tray_menu.append(&name_item).unwrap();
-    tray_menu.append(&version_item).unwrap();
-    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    tray_menu.append(&status_menu_item).unwrap();
-    tray_menu.append(&refresh_menu_item).unwrap();
-    tray_menu.append(&autostart_menu_item).unwrap();
-    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    tray_menu.append(&quit_menu_item).unwrap();
-
-    let quit_id = quit_menu_item.id().clone();
-    let refresh_id = refresh_menu_item.id().clone();
-    let autostart_id = autostart_menu_item.id().clone();
-
-    // 5. Initial Tray Icon (Start with 0% / Disconnected battery graphic)
-    let initial_icon = generate_battery_icon(None);
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("MCHOSE G3: Initializing...")
-        .with_icon(initial_icon)
-        .build()
-        .expect("Failed to initialize system tray icon");
-
-    // 6. Thread-safe status storage
-    let current_status = Arc::new(Mutex::new(BatteryStatus::Disconnected));
-    let status_clone = Arc::clone(&current_status);
-
-    // 7. Spawn background polling thread
-    let hid_api_thread = HidApi::new().ok();
-    thread::spawn(move || {
-        let Some(ref api) = hid_api_thread else { return; };
-        loop {
-            let battery = poll_mouse_battery(api);
-            {
-                let mut status = status_clone.lock().unwrap();
-                *status = battery;
-            }
-            thread::sleep(Duration::from_secs(30));
-        }
-    });
-
-    // 8. Main Event Loop using Winit (Optimized cadence to prevent UI jitter)
-    let menu_channel = MenuEvent::receiver();
-    let tray_icon_ref = Arc::new(tray_icon);
-    let tray_icon_loop = Arc::clone(&tray_icon_ref);
-
-    let _ = event_loop.run(move |_event, elwt| {
-        // Calm wakeup cadence (1 second) prevents CPU throttling and right-click jitter
-        elwt.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + Duration::from_secs(1)
-        ));
-
-        // Handle menu interactions
-        if let Ok(event) = menu_channel.try_recv() {
-            if event.id == quit_id {
-                elwt.exit();
-            } else if event.id == refresh_id {
-                if let Ok(exe_path) = std::env::current_exe() {
-                    let restarted = Command::new(exe_path)
-                        .arg("--silent-restart")
-                        .spawn()
-                        .is_ok();
-
-                    if restarted {
-                        elwt.exit();
-                    }
-                }
-            }
-            else if event.id == autostart_id {
-                let is_checked = autostart_menu_item.is_checked();
-                if is_checked {
-                    let _ = auto_launcher.enable();
-                } else {
-                    let _ = auto_launcher.disable();
-                }
-            }
-        }
-
-        let status = {
-            let s = current_status.lock().unwrap();
-            s.clone()
-        };
-
-        update_tray_ui(&tray_icon_loop, &status_menu_item, &status);
-    });
-}
-
-/// Dynamically generates a clean 32x32 battery icon with fill percentage
-fn generate_battery_icon(percentage: Option<u8>) -> Icon {
-    let width = 32usize;
-    let height = 32usize;
-    let mut rgba = vec![0u8; width * height * 4];
-
-    // Warning icon when battery data is unavailable.
-    if percentage.is_none() {
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-
-                // Upward-pointing warning triangle.
-                let dx = (x as i32 - 16).abs();
-                let half_width = (y as i32 - 5) * 12 / 22;
-                let in_triangle =
-                    (5..=27).contains(&y) && dx <= half_width;
-
-                // Black exclamation mark.
-                let exclamation_stem =
-                    (x == 15 || x == 16) && (11..=19).contains(&y);
-                let exclamation_dot =
-                    (x == 15 || x == 16) && (22..=23).contains(&y);
-
-                if in_triangle {
-                    rgba[idx] = 255;
-                    rgba[idx + 1] = 190;
-                    rgba[idx + 2] = 35;
-                    rgba[idx + 3] = 255;
-                }
-
-                if exclamation_stem || exclamation_dot {
-                    rgba[idx] = 25;
-                    rgba[idx + 1] = 25;
-                    rgba[idx + 2] = 25;
-                    rgba[idx + 3] = 255;
-                }
-            }
-        }
-
-        return Icon::from_rgba(rgba, width as u32, height as u32).unwrap();
-    }
-
-    // Normal horizontal battery icon.
-    let pct = percentage.unwrap_or(0);
-
-    // Outline color: red below 20%, gray otherwise.
-    let (outline_r, outline_g, outline_b) = if pct < 20 {
-        (230, 50, 50)
-    } else {
-        (220, 220, 220)
-    };
-
-    // Two-pixel-thick battery body outline.
-    // Body spans x=4..25 and y=8..24.
-    // Interior fill is inset to x=6..23 and y=10..22.
-    // Terminal is on the right.
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) * 4;
-
-            let is_border =
-                // Left and right sides, 2 pixels thick.
-                ((4..=5).contains(&x) && (8..=24).contains(&y))
-                || ((24..=25).contains(&x) && (8..=24).contains(&y))
-                // Top and bottom, 2 pixels thick.
-                || ((8..=9).contains(&y) && (6..=23).contains(&x))
-                || ((23..=24).contains(&y) && (6..=23).contains(&x));
-
-            let is_terminal =
-                (26..=27).contains(&x) && (14..=18).contains(&y);
-
-            // Fill grows from left to right inside the outline.
-            let fill_width = 18 * pct as usize / 100;
-            let is_fill =
-                x >= 6
-                && x < 6 + fill_width
-                && (10..=22).contains(&y);
-
-            if is_border || is_terminal {
-                rgba[idx] = outline_r;
-                rgba[idx + 1] = outline_g;
-                rgba[idx + 2] = outline_b;
-                rgba[idx + 3] = 255;
-            } else if is_fill {
-                if pct < 20 {
-                    // Red: very low.
-                    rgba[idx] = 230;
-                    rgba[idx + 1] = 50;
-                    rgba[idx + 2] = 50;
-                } else if pct < 50 {
-                    // Yellow: low.
-                    rgba[idx] = 240;
-                    rgba[idx + 1] = 200;
-                    rgba[idx + 2] = 50;
-                } else {
-                    // Green: medium to high.
-                    rgba[idx] = 50;
-                    rgba[idx + 1] = 205;
-                    rgba[idx + 2] = 50;
-                }
-
-                rgba[idx + 3] = 255;
-            } else {
-                // Transparent background.
-                rgba[idx + 3] = 0;
-            }
-        }
-    }
-
-    Icon::from_rgba(rgba, width as u32, height as u32).unwrap()
-}
-
-
-
-
-//fetch battery data
-fn poll_mouse_battery(api: &HidApi) -> BatteryStatus {
-    const USAGE_PAGE: u16 = 0xFF02;
-    const USAGE: u16 = 0x0002;
-
-    const QUERY_PREFIX: [u8; 8] =
-        [0x09, 0x0C, 0x09, 0x01, 0x01, 0x00, 0x01, 0x00];
-
-    // Look specifically for the HID collection used by the working Python script.
-    let paths: Vec<_> = api
-        .device_list()
-        .filter(|d| {
-            d.vendor_id() == VENDOR_ID
-                && d.product_id() == PRODUCT_ID
-                && d.usage_page() == USAGE_PAGE
-                && d.usage() == USAGE
-        })
-        .map(|d| d.path().to_owned())
-        .collect();
-
-    for path in paths {
-        // Retry briefly in case the mouse has just woken up.
-        for attempt in 0..3 {
-            if let Ok(device) = api.open_path(&path) {
-                let mut query = vec![0u8; REPORT_SIZE];
-                query[..QUERY_PREFIX.len()].copy_from_slice(&QUERY_PREFIX);
-
-                // Match the Python script: send the query before reading.
-                if device.send_feature_report(&query).is_ok() {
-                    thread::sleep(Duration::from_millis(50));
-
-                    let mut response = vec![0u8; REPORT_SIZE];
-                    response[0] = REPORT_ID;
-
-                    if let Ok(length) =
-                        device.get_feature_report(&mut response)
-                    {
-                        if length >= 9
-                            && response[..8] == QUERY_PREFIX
-                            && response[8] <= 100
-                        {
-                            return BatteryStatus::Connected(response[8]);
-                        }
-                    }
-                }
-            }
-
-            if attempt < 2 {
-                thread::sleep(Duration::from_millis(250));
-            }
-        }
-    }
-
-    BatteryStatus::Disconnected
-}
-
-
-/// Updates tray tooltip, menu text, and dynamic battery icon
-fn update_tray_ui(
-    tray: &tray_icon::TrayIcon,
-    status_item: &MenuItem,
-    status: &BatteryStatus,
-) {
-    match status {
-        BatteryStatus::Connected(pct) => {
-            let _ = tray.set_tooltip(Some(format!("MCHOSE G3: {}%", pct)));
-            let _ = tray.set_icon(Some(generate_battery_icon(Some(*pct))));
-            //let _ = tray.set_icon(Some(generate_battery_icon(Some(5)))); //Look testing
-            status_item.set_text(format!("Status: Connected ({}%)", pct));
-        }
-        BatteryStatus::Disconnected => {
-            let _ = tray.set_tooltip(Some("MCHOSE G3: Disconnected / Sleeping"));
-            let _ = tray.set_icon(Some(generate_battery_icon(None)));
-            status_item.set_text("Status: Disconnected / Sleeping");
-        }
-    }
+    run(shared);
 }
