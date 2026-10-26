@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 hidapi = "2"
-tray-icon = "0.19"
+# default-features = false drops the libxdo link (we only use separators, not Copy/Paste items)
+tray-icon = { version = "0.19", default-features = false }
 notify-rust = "4"
 
 # ---- Windows only ----
@@ -20,12 +21,12 @@ windows-sys = { version = "0.59", features = [
 # ---- Linux only ----
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+
+# ---- Build script (Windows only)
+[build-dependencies]
+winres = "0.1.12"
 
 [profile.release]
 opt-level = "s"
 lto = true
 strip = true
-
-[build-dependencies]
-winres = "0.1.12"
