@@ -1,4 +1,6 @@
-//! Start-at-login handling, plus remembering that the user was already asked.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Start-at-login handling, plus small persisted settings ("already asked" flag and
+//! the low-battery notification switch).
 //!
 //! Windows: HKCU\Software\Microsoft\Windows\CurrentVersion\Run  (autostart)
 //!          HKCU\Software\MCHOSE_G3_Battery_Monitor             (prompt memory)
@@ -7,7 +9,8 @@
 //!          ~/.local/share/applications/mchose-g3-battery-monitor.desktop (launcher entry)
 
 pub use imp::{
-    install_launcher, is_enabled, mark_prompt_shown, prompt_shown, set_enabled, sync_path,
+    install_launcher, is_enabled, mark_prompt_shown, notifications_enabled, prompt_shown,
+    set_enabled, set_notifications_enabled, sync_path,
 };
 
 // ======================================================================
@@ -23,6 +26,7 @@ mod imp {
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const SETTINGS_KEY: &str = r"Software\MCHOSE_G3_Battery_Monitor";
     const PROMPT_VALUE: &str = "StartupPromptShown";
+    const NOTIFY_VALUE: &str = "LowBatteryNotifications";
 
     fn command() -> Result<String, String> {
         let exe = env::current_exe().map_err(|e| e.to_string())?;
@@ -88,6 +92,22 @@ mod imp {
             let _ = key.set_value(PROMPT_VALUE, &1u32);
         }
     }
+
+    /// Low-battery notifications: on unless the user switched them off.
+    pub fn notifications_enabled() -> bool {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(SETTINGS_KEY, KEY_READ)
+            .ok()
+            .and_then(|k| k.get_value::<u32, _>(NOTIFY_VALUE).ok())
+            .map(|v| v != 0)
+            .unwrap_or(true)
+    }
+
+    pub fn set_notifications_enabled(enabled: bool) {
+        if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
+            let _ = key.set_value(NOTIFY_VALUE, &(enabled as u32));
+        }
+    }
 }
 
 // ======================================================================
@@ -103,7 +123,8 @@ mod imp {
     const DESKTOP_FILE_NAME: &str = "mchose-g3-battery-monitor.desktop";
     const SETTINGS_DIR: &str = "mchose-g3-battery-monitor";
     const SETTINGS_FILE: &str = "settings.conf";
-    const PROMPT_LINE: &str = "startup_prompt_shown=true";
+    const KEY_PROMPT_SHOWN: &str = "startup_prompt_shown";
+    const KEY_NOTIFICATIONS: &str = "low_battery_notifications";
 
     // App icon, embedded in the binary and copied to the user's icon folder.
     const ICON_FILE_NAME: &str = "mchose-g3-battery-monitor.png";
@@ -277,19 +298,48 @@ mod imp {
         }
     }
 
+    /// Reads `key=value` from settings.conf.
+    fn read_setting(key: &str) -> Option<String> {
+        let text = fs::read_to_string(settings_path()?).ok()?;
+        text.lines().find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == key).then(|| v.trim().to_string())
+        })
+    }
+
+    /// Sets `key=value` in settings.conf, keeping every other key.
+    fn write_setting(key: &str, value: &str) {
+        let Some(path) = settings_path() else {
+            return;
+        };
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let mut lines: Vec<String> = existing
+            .lines()
+            .filter(|l| l.split_once('=').map(|(k, _)| k.trim() != key).unwrap_or(true))
+            .map(String::from)
+            .collect();
+        lines.push(format!("{key}={value}"));
+
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(path, lines.join("\n") + "\n");
+    }
+
     pub fn prompt_shown() -> bool {
-        settings_path()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .map(|text| text.lines().any(|l| l.trim() == PROMPT_LINE))
-            .unwrap_or(false)
+        read_setting(KEY_PROMPT_SHOWN).as_deref() == Some("true")
     }
 
     pub fn mark_prompt_shown() {
-        if let Some(path) = settings_path() {
-            if let Some(dir) = path.parent() {
-                let _ = fs::create_dir_all(dir);
-            }
-            let _ = fs::write(path, format!("{PROMPT_LINE}\n"));
-        }
+        write_setting(KEY_PROMPT_SHOWN, "true");
+    }
+
+    /// Low-battery notifications: on unless the user switched them off.
+    pub fn notifications_enabled() -> bool {
+        read_setting(KEY_NOTIFICATIONS).as_deref() != Some("false")
+    }
+
+    pub fn set_notifications_enabled(enabled: bool) {
+        write_setting(KEY_NOTIFICATIONS, if enabled { "true" } else { "false" });
     }
 }

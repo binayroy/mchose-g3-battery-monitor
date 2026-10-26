@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! HID worker: cached battery query, then live report monitoring.
 //! Direct port of the working Python script.
 
@@ -64,7 +65,12 @@ pub fn run(shared: Arc<Shared>) {
             match cached_battery(&mut api) {
                 Ok((percentage, path)) => {
                     crate::dlog!("[CACHE] Request successful: {percentage:?}");
-                    shared.set_cached(percentage);
+                    // Low battery at startup (or after a dongle re-plug) -> notify once.
+                    if shared.set_cached(percentage) {
+                        if let Some(p) = percentage {
+                            notify_low_battery(p);
+                        }
+                    }
                     break path;
                 }
                 Err(e) => {

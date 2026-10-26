@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Hides the console window when launching on Windows
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
@@ -76,7 +77,7 @@ fn tooltip_text(s: &Snapshot) -> String {
 // ======================================================================
  
 const AUTOSTART_QUESTION: &str =
-    "Would you like MCHOSE G3 Battery Monitor to launch automatically when you sign in? You can chnage this setting later";
+    "Would you like MCHOSE G3 Battery Monitor to launch automatically when you sign in?";
  
 #[cfg(target_os = "windows")]
 fn ask_autostart() -> bool {
@@ -141,9 +142,11 @@ struct App {
     status_item: MenuItem,
     receiver_item: MenuItem,
     autostart_item: CheckMenuItem,
+    notifications_item: CheckMenuItem,
     quit_id: MenuId,
     refresh_id: MenuId,
     autostart_id: MenuId,
+    notifications_id: MenuId,
     shared: Arc<Shared>,
     last_snapshot: Option<Snapshot>,
     last_icon: Option<Option<u8>>,
@@ -155,7 +158,7 @@ impl App {
     /// (Win32 message loop on Windows, gtk::init on Linux).
     fn new(shared: Arc<Shared>) -> Self {
         crate::dlog!("[MAIN] building tray application");
-    let autostart_active = startup_prompt();
+        let autostart_active = startup_prompt();
  
         let menu = Menu::new();
         let name_item = MenuItem::new(APP_NAME, false, None);
@@ -164,6 +167,12 @@ impl App {
         let receiver_item = MenuItem::new("Receiver: Connected", false, None);
         let refresh_item = MenuItem::new("Refresh Now", true, None);
         let autostart_item = CheckMenuItem::new("Launch at Startup", true, autostart_active, None);
+        let notifications_item = CheckMenuItem::new(
+            "Low Battery Notification",
+            true,
+            shared.notifications_enabled(),
+            None,
+        );
         let quit_item = MenuItem::new("Quit", true, None);
  
         menu.append(&name_item).unwrap();
@@ -173,6 +182,7 @@ impl App {
         menu.append(&receiver_item).unwrap();
         menu.append(&refresh_item).unwrap();
         menu.append(&autostart_item).unwrap();
+        menu.append(&notifications_item).unwrap();
         menu.append(&PredefinedMenuItem::separator()).unwrap();
         menu.append(&quit_item).unwrap();
  
@@ -189,9 +199,11 @@ impl App {
             quit_id: quit_item.id().clone(),
             refresh_id: refresh_item.id().clone(),
             autostart_id: autostart_item.id().clone(),
+            notifications_id: notifications_item.id().clone(),
             status_item,
             receiver_item,
             autostart_item,
+            notifications_item,
             shared,
             last_snapshot: None,
             last_icon: Some(None),
@@ -215,6 +227,11 @@ impl App {
                 self.shared.request_refresh();
             } else if event.id == self.autostart_id {
                 self.toggle_autostart();
+            } else if event.id == self.notifications_id {
+                // The check item flips itself on click; apply and remember the new state.
+                let enabled = self.notifications_item.is_checked();
+                self.shared.set_notifications_enabled(enabled);
+                autostart::set_notifications_enabled(enabled);
             }
         }
  
@@ -326,6 +343,8 @@ fn main() {
     autostart::install_launcher();
  
     let shared = Arc::new(Shared::new());
+    // Saved preference (default: on).
+    shared.set_notifications_enabled(autostart::notifications_enabled());
  
     // Background HID worker (cached query, then live reports).
     let worker_state = Arc::clone(&shared);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Optional debug log. Start the app with `--debug-log` and it writes
 //! timestamped lines (with the thread id) to  <temp dir>/mchose-g3-debug.log
 //! Windows: %TEMP%\mchose-g3-debug.log      Linux: /tmp/mchose-g3-debug.log

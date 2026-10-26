@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! State shared between the HID worker thread and the UI thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// A battery level at or below this (in %) triggers the low-battery alert.
+pub const LOW_BATTERY_PERCENT: u8 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkStatus {
@@ -33,6 +37,24 @@ pub struct Shared {
     inner: Mutex<Inner>,
     stop: AtomicBool,
     refresh: AtomicBool,
+    notifications: AtomicBool,
+}
+
+/// Decides whether a low-battery alert is due for this reading.
+/// It fires once, then re-arms when the level goes back above the threshold.
+fn low_alert_due(inner: &mut Inner, percentage: Option<u8>) -> bool {
+    match percentage {
+        Some(p) if p <= LOW_BATTERY_PERCENT => {
+            let due = !inner.low_alert_active;
+            inner.low_alert_active = true;
+            due
+        }
+        Some(_) => {
+            inner.low_alert_active = false;
+            false
+        }
+        None => false,
+    }
 }
 
 impl Shared {
@@ -49,6 +71,7 @@ impl Shared {
             }),
             stop: AtomicBool::new(false),
             refresh: AtomicBool::new(false),
+            notifications: AtomicBool::new(true),
         }
     }
 
@@ -63,12 +86,16 @@ impl Shared {
     // ---- state transitions used by the monitor thread ----
 
     /// Cached battery query succeeded (dongle present, mouse state still unknown).
-    pub fn set_cached(&self, percentage: Option<u8>) {
+    /// Returns true if a low-battery notification should be shown now.
+    pub fn set_cached(&self, percentage: Option<u8>) -> bool {
         let mut g = self.lock();
         g.snapshot.percentage = percentage;
         g.snapshot.status = LinkStatus::Checking;
         g.snapshot.receiver = true;
         g.last_live_event = Some(Instant::now());
+
+        let due = low_alert_due(&mut g, percentage);
+        due && self.notifications_enabled()
     }
 
     /// Cached battery query failed (dongle missing / unreadable).
@@ -93,22 +120,15 @@ impl Shared {
         g.last_live_event = Some(Instant::now());
     }
 
-    /// Live battery report. Returns true if a low-battery alert should fire now.
+    /// Live battery report. Returns true if a low-battery notification should be shown now.
     pub fn live_battery(&self, percentage: u8) -> bool {
         let mut g = self.lock();
         g.snapshot.percentage = Some(percentage);
         g.snapshot.status = LinkStatus::Connected;
         g.last_live_event = Some(Instant::now());
 
-        if percentage < 20 && !g.low_alert_active {
-            g.low_alert_active = true;
-            true
-        } else {
-            if percentage >= 20 {
-                g.low_alert_active = false;
-            }
-            false
-        }
+        let due = low_alert_due(&mut g, Some(percentage));
+        due && self.notifications_enabled()
     }
 
     /// Live connection report from the dongle (mouse on/off).
@@ -139,6 +159,14 @@ impl Shared {
     }
 
     // ---- control flags ----
+
+    pub fn notifications_enabled(&self) -> bool {
+        self.notifications.load(Ordering::SeqCst)
+    }
+
+    pub fn set_notifications_enabled(&self, enabled: bool) {
+        self.notifications.store(enabled, Ordering::SeqCst);
+    }
 
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);

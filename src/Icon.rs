@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tray icon drawing (design taken unchanged from the original Rust app).
 
 use tray_icon::Icon;
