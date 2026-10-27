@@ -11,7 +11,7 @@ It reads the battery % straight from the 2.4 GHz USB receiver (dongle) over HID,
 | Platform | Notes |
 |---|---|
 | Windows 10 / 11 | Works out of the box. |
-| Linux | Needs a tray that supports AppIndicator / StatusNotifier icons and a udev rule (see below). Tested on KDE Plasma, XFCE, GNOME, Cinnamon and Cosmic.|
+| Linux | Needs a tray that supports AppIndicator / StatusNotifier icons and a udev rule (see below). Tested on KDE Plasma, XFCE, GNOME, Cinnamon, MATE and Cosmic.|
 
 > macOS is not supported.
 
