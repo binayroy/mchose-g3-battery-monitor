@@ -19,8 +19,8 @@ It reads the battery % straight from the 2.4 GHz USB receiver (dongle) over HID,
 
 ## Windows
 
-1. [**Download**](Download_link) or take the `.exe` from `target/release/windows`.
-2. Run `mchose-g3-battery-monitor.exe`. Select autostart option and look for the icon in the tray (it may be inside the hidden-icons arrow).
+1. [**Download**](https://github.com/binayroy/mchose-g3-battery-monitor/releases/download/v1.0.0/mchose-g3-battery-monitor-windows-v1.0.0-amd64.exe) or take the `.exe` from `release`.
+2. Run `mchose-g3-battery-monitor-windows-v*.*.*-amd64.exe`. Select autostart option and look for the icon in the tray (it may be inside the hidden-icons arrow).
 
 No driver or extra setup is needed.
 
@@ -31,7 +31,7 @@ No driver or extra setup is needed.
 - Install `libgtk-3-0` and `libayatana-appindicator3-1`.
 - If you're using Fedora: `libgtk-3-0` and `libayatana-appindicator-gtk3`.
 
-2. [**Download**](Download_link) or take the ELF binary from `target/release/linux` (Works with all the destros)
+2. [**Download**](https://github.com/binayroy/mchose-g3-battery-monitor/releases/download/v1.0.0/mchose-g3-battery-monitor-linux-v1.0.0-amd64-ELF) or take the ELF binary from `release` (Works with all the destros)
 
 **3. Allow your current user account to read the dongle.** 
 - Run the following bash commands on your terminal:
@@ -56,7 +56,7 @@ sudo udevadm trigger --subsystem-match=hidraw
 | XFCE |Modern setup Works natively. If needed add the **Status Notifier Plugin** to the panel (`xfce4-statusnotifier-plugin`): right-click the panel → Panel → Add New Items. |
 | GNOME | Install and enable the **AppIndicator** extension (`gnome-shell-extension-appindicator`). Ubuntu ships it enabled. Log out and in if needed. <br> [Click here](https://extensions.gnome.org/extension/615/appindicator-support/) to install using GNOME's official extensions page|
 
-**5. Run the binary.** It asks the startup question once, then the icon appears.
+**5. Run the binary:**`mchose-g3-battery-monitor-linux-v*.*.*-amd64-ELF` It asks the startup question once, then the icon appears.
 
 # Using the app
 
